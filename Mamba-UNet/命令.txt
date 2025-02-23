@@ -1,0 +1,3 @@
+python test_2D_fully.py --root_path ../data/ACDC --exp ACDC/Semi_Mamba_UNet --model mambaunet
+
+python train_Semi_Mamba_UNet.py --root_path ../data/ACDC --exp ACDC/Semi_Mamba_UNet --max_iterations 30000 --labeled_num 3 --batch_size 8  --labeled_bs 4 --num_classes 5

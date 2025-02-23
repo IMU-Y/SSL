@@ -39,4 +39,5 @@ ENV/
 *.nii
 *.nii.gz
 *.png
+*.zip
 data/
