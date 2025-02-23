@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 虚拟环境
+myenv/
+venv/
+ENV/
+
+# 模型文件
+*.pth
+*.pt
+*.h5
+*.ckpt
+*.pb
+
+# 数据文件
+*.npy
+*.npz
+*.dcm
+*.nii
+*.nii.gz
+*.png
+data/
