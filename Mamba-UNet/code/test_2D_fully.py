@@ -53,17 +53,12 @@ def calculate_metric_percase(pred, gt):
     return dice
 
 
-def visualize_results(image, label, pred, case, test_save_path):
+def visualize_results(pred, case, test_save_path):
     """
-    创建原图、标签和预测结果的对比可视化
+    只保存预测结果的可视化，不添加文字标记
     """
-    # 确保原图在正确的范围内 [0, 255]
-    if image.dtype == np.float32:
-        image = (image * 255).astype(np.uint8)
-    
-    # 创建可视化图像
-    vis_label = np.zeros((label.shape[0], label.shape[1], 3), dtype=np.uint8)
-    vis_pred = np.zeros_like(vis_label)
+    # 创建预测结果的可视化图像
+    vis_pred = np.zeros((pred.shape[0], pred.shape[1], 3), dtype=np.uint8)
     
     # 定义颜色映射
     colors = [
@@ -73,32 +68,14 @@ def visualize_results(image, label, pred, case, test_save_path):
         [255, 255, 0],  # 黄色 - 钙化斑块
     ]
     
-    # 为标签和预测结果上色
+    # 为预测结果上色
     for i in range(1, 5):  # 1-4类（跳过背景0）
-        mask_label = label == i
         mask_pred = pred == i
-        # print(f"Class {i} in label: {np.sum(mask_label)}, in pred: {np.sum(mask_pred)}")  # 检查每个类别的像素数
-        vis_label[mask_label] = colors[i-1]
         vis_pred[mask_pred] = colors[i-1]
     
-    # 创建并排显示的图像
-    h, w = image.shape[:2]
-    combined = np.zeros((h, w*3, 3), dtype=np.uint8)
-    
-    # 直接使用原图（已经是RGB格式）
-    combined[:, :w] = image
-    combined[:, w:2*w] = vis_label
-    combined[:, 2*w:] = vis_pred
-    
-    # 添加文字标注
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    cv2.putText(combined, 'Original', (w//4, 30), font, 1, (255,255,255), 2)
-    cv2.putText(combined, 'Ground Truth', (w+w//4, 30), font, 1, (255,255,255), 2)
-    cv2.putText(combined, 'Prediction', (2*w+w//4, 30), font, 1, (255,255,255), 2)
-    
-    # 保存结果前转换回BGR格式（OpenCV使用BGR）
-    combined = cv2.cvtColor(combined, cv2.COLOR_RGB2BGR)
-    cv2.imwrite(os.path.join(test_save_path, f"{case}_comparison.png"), combined)
+    # 保存结果（转换为BGR格式）
+    vis_pred = cv2.cvtColor(vis_pred, cv2.COLOR_RGB2BGR)
+    cv2.imwrite(os.path.join(test_save_path, f"{int(case) - 4123}.png"), vis_pred)
 
 
 def test_single_volume(case, net, test_save_path, FLAGS):
@@ -150,9 +127,9 @@ def test_single_volume(case, net, test_save_path, FLAGS):
         metric = calculate_metric_percase(pred == i, label == i)
         metrics.append(metric)
 
-    # 可视化
-    visualize_results(original_image, label, pred, case, test_save_path)
-    
+    # 可视化预测结果
+    visualize_results(pred, case, test_save_path)  # 只传递预测结果
+
     return metrics
 
 

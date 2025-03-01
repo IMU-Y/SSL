@@ -117,7 +117,7 @@ def xavier_normal_init_weight(model):
 def patients_to_slices(dataset, patiens_num):
     ref_dict = None
     if "ACDC" in dataset:
-        ref_dict = {'1':14,'2':28, "3": 2180, "7": 136,
+        ref_dict = {'1':14,'2':28, "3": 2180, "5": 1293,
                     "14": 256, "21": 396, "28": 512, "35": 664, "140": 1311}
     else:
         print("Error")
@@ -201,7 +201,6 @@ def train(args, snapshot_path):
     iterator = tqdm(range(max_epoch), ncols=70)
     for epoch_num in iterator:
         for i_batch, sampled_batch in enumerate(trainloader):
-
             volume_batch, label_batch = sampled_batch['image'], sampled_batch['label']
             volume_batch, label_batch = volume_batch.cuda(), label_batch.cuda()
 
@@ -210,40 +209,45 @@ def train(args, snapshot_path):
 
             outputs2 = model2(volume_batch)
             outputs_soft2 = torch.softmax(outputs2, dim=1)
-            consistency_weight = get_current_consistency_weight(
-                iter_num // 150)
+            
+            # 计算不确定性
+            uncertainty = abs(torch.max(outputs_soft1, dim=1)[0] - torch.max(outputs_soft2, dim=1)[0])
+            confidence = 1 - uncertainty
+            confidence = confidence ** 4  # 不确定性的4次方加权
+            
+            # 有标签数据的损失
+            loss1 = 0.5 * (ce_loss(outputs1[:args.labeled_bs], label_batch[:args.labeled_bs].long()) + 
+                           dice_loss(outputs_soft1[:args.labeled_bs], label_batch[:args.labeled_bs].unsqueeze(1)))
+            loss2 = 0.5 * (ce_loss(outputs2[:args.labeled_bs], label_batch[:args.labeled_bs].long()) + 
+                           dice_loss(outputs_soft2[:args.labeled_bs], label_batch[:args.labeled_bs].unsqueeze(1)))
 
-            loss1 = 0.5 * (ce_loss(outputs1[:args.labeled_bs], label_batch[:args.labeled_bs].long()) + dice_loss(
-                outputs_soft1[:args.labeled_bs], label_batch[:args.labeled_bs].unsqueeze(1)))
-            loss2 = 0.5 * (ce_loss(outputs2[:args.labeled_bs], label_batch[:args.labeled_bs].long()) + dice_loss(
-                outputs_soft2[:args.labeled_bs], label_batch[:args.labeled_bs].unsqueeze(1)))
+            # 生成伪标签
+            pseudo_outputs1 = torch.argmax(outputs_soft1[args.labeled_bs:].detach(), dim=1, keepdim=False)
+            pseudo_outputs2 = torch.argmax(outputs_soft2[args.labeled_bs:].detach(), dim=1, keepdim=False)
 
-            pseudo_outputs1 = torch.argmax(
-                outputs_soft1[args.labeled_bs:].detach(), dim=1, keepdim=False)
-            pseudo_outputs2 = torch.argmax(
-                outputs_soft2[args.labeled_bs:].detach(), dim=1, keepdim=False)
+            # 使用不确定性加权的伪标签损失
+            pseudo_weight = confidence[args.labeled_bs:]  # 只取无标签数据部分的权重
+            
+            # 计算加权的伪标签损失
+            criterion_no_reduction = CrossEntropyLoss(reduction='none')
+            pseudo_loss1 = criterion_no_reduction(outputs1[args.labeled_bs:], pseudo_outputs2)
+            pseudo_loss2 = criterion_no_reduction(outputs2[args.labeled_bs:], pseudo_outputs1)
+            
+            # 应用不确定性权重
+            weighted_pseudo_loss1 = (pseudo_loss1 * pseudo_weight).mean()
+            weighted_pseudo_loss2 = (pseudo_loss2 * pseudo_weight).mean()
 
-            pseudo_supervision1 = dice_loss(
-                outputs_soft1[args.labeled_bs:], pseudo_outputs2.unsqueeze(1))
-            pseudo_supervision2 = dice_loss(
-                outputs_soft2[args.labeled_bs:], pseudo_outputs1.unsqueeze(1))
+            consistency_weight = get_current_consistency_weight(iter_num // 150)
+            
+            # 总损失
+            model1_loss = loss1 + consistency_weight * weighted_pseudo_loss1
+            model2_loss = loss2 + consistency_weight * weighted_pseudo_loss2
 
-            from utils.losses import ConstraLoss
-            con1 = ConstraLoss(outputs1,outputs2)
-
-            # model1_loss = loss1 + consistency_weight * pseudo_supervision1
-            # model2_loss = loss2 + consistency_weight * pseudo_supervision2
-
-            model1_loss = loss1 + consistency_weight * pseudo_supervision1 +0.5*con1
-            model2_loss = loss2 + consistency_weight * pseudo_supervision2 +0.5*con1
-
-            loss = model1_loss + model2_loss 
+            loss = model1_loss + model2_loss
 
             optimizer1.zero_grad()
             optimizer2.zero_grad()
-
             loss.backward()
-
             optimizer1.step()
             optimizer2.step()
 
