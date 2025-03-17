@@ -75,7 +75,7 @@ def visualize_results(pred, case, test_save_path):
     
     # 保存结果（转换为BGR格式）
     vis_pred = cv2.cvtColor(vis_pred, cv2.COLOR_RGB2BGR)
-    cv2.imwrite(os.path.join(test_save_path, f"{int(case) - 4123}.png"), vis_pred)
+    cv2.imwrite(os.path.join(test_save_path, f"{case}.png"), vis_pred)
 
 
 def test_single_volume(case, net, test_save_path, FLAGS):

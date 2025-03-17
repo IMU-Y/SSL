@@ -118,7 +118,7 @@ def patients_to_slices(dataset, patiens_num):
     ref_dict = None
     if "ACDC" in dataset:
         ref_dict = {'1':14,'2':28, "3": 2180, "5": 1293,
-                    "14": 256, "21": 396, "28": 512, "35": 664, "140": 1311}
+                    "9": 590, "17": 295, "28": 512, "35": 664, "140": 1311}
     else:
         print("Error")
     return ref_dict[str(patiens_num)]
