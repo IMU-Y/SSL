@@ -44,9 +44,9 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--root_path', type=str,
                     default='../data/ACDC', help='Name of Experiment')
 parser.add_argument('--exp', type=str,
-                    default='ACDC/Mean_Teacher_ViT', help='experiment_name')
+                    default='ACDC/Mean_Teacher_ViM', help='experiment_name')
 parser.add_argument('--model', type=str,
-                    default='swinunet', help='model_name')
+                    default='mambaunet', help='model_name')
 parser.add_argument('--max_iterations', type=int,
                     default=30000, help='maximum epoch number to train')
 parser.add_argument('--batch_size', type=int, default=8,

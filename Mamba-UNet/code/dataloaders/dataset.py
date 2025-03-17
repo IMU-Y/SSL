@@ -193,21 +193,42 @@ class CTATransform(object):
         label = self.resize(label)
         to_tensor = transforms.ToTensor()
 
-        # fix dimensions
-        image = torch.from_numpy(image.astype(np.float32)).unsqueeze(0)
-        label = torch.from_numpy(label.astype(np.uint8))
+        # 确保图像格式正确
+        if isinstance(image, np.ndarray):
+            if image.shape[0] == 3:  # 如果是 [C,H,W] 格式
+                image = np.transpose(image, (1, 2, 0))  # 转换为 [H,W,C]
+        elif isinstance(image, torch.Tensor):
+            if len(image.shape) == 3 and image.shape[0] == 3:  # 如果是 [C,H,W] 格式
+                image = image.permute(1, 2, 0).contiguous().numpy()  # 转换为 [H,W,C]
+            else:
+                image = image.numpy()
+                if len(image.shape) == 3 and image.shape[0] == 1:  # 如果是 [1,H,W] 格式
+                    image = image.squeeze(0)  # 转换为 [H,W]
+
+        # 确保值范围在 [0,1] 之间
+        image = (image * 255).astype(np.uint8)
+        label = label.astype(np.uint8)
 
         # apply augmentations
-        image_weak = augmentations.cta_apply(transforms.ToPILImage()(image), ops_weak)
+        if len(image.shape) == 2:  # 如果是灰度图
+            image = Image.fromarray(image, mode='L')
+        else:  # 如果是RGB图
+            image = Image.fromarray(image, mode='RGB')
+        
+        label = Image.fromarray(label, mode='L')
+
+        image_weak = augmentations.cta_apply(image, ops_weak)
         image_strong = augmentations.cta_apply(image_weak, ops_strong)
-        label_aug = augmentations.cta_apply(transforms.ToPILImage()(label), ops_weak)
+        label_aug = augmentations.cta_apply(label, ops_weak)
         label_aug = to_tensor(label_aug).squeeze(0)
         label_aug = torch.round(255 * label_aug).int()
 
         sample = {
+            "image": to_tensor(image),
             "image_weak": to_tensor(image_weak),
             "image_strong": to_tensor(image_strong),
             "label_aug": label_aug,
+            "label": label_aug
         }
         return sample
 
@@ -219,8 +240,14 @@ class CTATransform(object):
         return pil_img
 
     def resize(self, image):
-        x, y = image.shape
-        return zoom(image, (self.output_size[0] / x, self.output_size[1] / y), order=0)
+        if len(image.shape) == 3:
+            # 对于 RGB 图像 (H,W,C)
+            x, y, c = image.shape
+            return zoom(image, (self.output_size[0] / x, self.output_size[1] / y, 1), order=0)
+        else:
+            # 对于灰度图像 (H,W)
+            x, y = image.shape
+            return zoom(image, (self.output_size[0] / x, self.output_size[1] / y), order=0)
 
 
 class RandomGenerator(object):
@@ -336,3 +363,46 @@ def grouper(iterable, n):
     # grouper('ABCDEFG', 3) --> ABC DEF"
     args = [iter(iterable)] * n
     return zip(*args)
+
+class RandomGenerator_w(object):
+    def __init__(self, output_size):
+        self.output_size = output_size
+
+    def __call__(self, sample):
+        image, label = sample["image"], sample["label"]
+        x, y = image.shape
+        image = zoom(image, (self.output_size[0] / x, self.output_size[1] / y), order=0)
+        label = zoom(label, (self.output_size[0] / x, self.output_size[1] / y), order=0)
+        image = torch.from_numpy(image.astype(np.float32)).unsqueeze(0)
+        label = torch.from_numpy(label.astype(np.uint8))
+        sample = {"image": image, "label": label}
+        return sample
+
+class RandomGenerator_s(object):
+    def __init__(self, output_size):
+        self.output_size = output_size
+
+    def __call__(self, sample):
+        image, label = sample["image"], sample["label"]
+        # ind = random.randrange(0, img.shape[0])
+        # image = img[ind, ...]
+        # label = lab[ind, ...]
+        if random.random() > 0.5:
+            image, label = random_rot_flip(image, label)
+        elif random.random() > 0.5:
+            image, label = random_rotate(image, label)
+        x, y = image.shape
+        image = zoom(image, (self.output_size[0] / x, self.output_size[1] / y), order=0)
+        label = zoom(label, (self.output_size[0] / x, self.output_size[1] / y), order=0)
+        image = color_jitter(image).type("torch.FloatTensor")
+        image = rand_affine(image).type("torch.FloatTensor")
+        image = gaussian_blur(image).type("torch.FloatTensor")
+        image = rand_gray(image).type("torch.FloatTensor")
+#         grid_mask = Grid_Mask()
+#         image = grid_mask(image).type("torch.FloatTensor")
+#         image = torch.from_numpy(image.astype(np.float32)).unsqueeze(0)
+        label = torch.from_numpy(label.astype(np.uint8))
+        
+        sample = {"image": image, "label": label}
+        return sample
+    

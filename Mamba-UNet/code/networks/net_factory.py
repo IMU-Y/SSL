@@ -6,6 +6,7 @@ import argparse
 from networks.vision_transformer import SwinUnet as ViT_seg
 from networks.config import get_config
 from networks.nnunet import initialize_network
+from networks.projector import projectors, classifier
 from networks.mamba_sys import VSSM
 import torch
 from collections import OrderedDict
@@ -75,7 +76,7 @@ args = parser.parse_args()
 config = get_config(args)
 
 
-def net_factory(net_type="unet", in_chns=3, class_num=4):
+def net_factory(net_type="unet", in_chns=3, class_num=5):
     if net_type == "unet":
         net = UNet(in_chns=in_chns, class_num=class_num).cuda()
     elif net_type == "enet":
@@ -105,6 +106,10 @@ def net_factory(net_type="unet", in_chns=3, class_num=4):
                 dims=[96, 192, 384, 768],
             ))
         ])).cuda()
+    elif net_type == "projector":
+        net = projectors().cuda()
+    elif net_type == "classifier":
+        net = classifier().cuda()
     else:
         net = None
     return net
