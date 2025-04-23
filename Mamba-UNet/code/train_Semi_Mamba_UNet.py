@@ -199,180 +199,252 @@ def train(args, snapshot_path):
     best_performance1 = 0.0
     best_performance2 = 0.0
     iterator = tqdm(range(max_epoch), ncols=70)
-    for epoch_num in iterator:
-        for i_batch, sampled_batch in enumerate(trainloader):
-            volume_batch, label_batch = sampled_batch['image'], sampled_batch['label']
-            volume_batch, label_batch = volume_batch.cuda(), label_batch.cuda()
 
-            outputs1 = model1(volume_batch)
-            outputs_soft1 = torch.softmax(outputs1, dim=1)
+    # 第一阶段：训练和保存检查点
+    checkpoints = []
+    checkpoint_iterations = [
+        max_iterations // 3,  # 1/3处检查点
+        max_iterations // 2,  # 1/2处检查点
+        max_iterations  # 最终检查点
+    ]
+    
+    unlabeled_data = unlabeled_idxs.copy()  # 保存所有无标签数据索引
+    reliable_pseudo_labels = {}  # 存储可靠的伪标签
+    
+    for stage in range(3):  # 三阶段训练
+        iter_num = 0
+        best_performance1 = 0.0
+        best_performance2 = 0.0
+        
+        for epoch_num in iterator:
+            for i_batch, sampled_batch in enumerate(trainloader):
+                volume_batch, label_batch = sampled_batch['image'], sampled_batch['label']
+                volume_batch, label_batch = volume_batch.cuda(), label_batch.cuda()
 
-            outputs2 = model2(volume_batch)
-            outputs_soft2 = torch.softmax(outputs2, dim=1)
-            
-            # 计算不确定性
-            uncertainty = abs(torch.max(outputs_soft1, dim=1)[0] - torch.max(outputs_soft2, dim=1)[0])
-            confidence = 1 - uncertainty
-            confidence = confidence ** 4  # 不确定性的4次方加权
-            
-            # 有标签数据的损失
-            loss1 = 0.5 * (ce_loss(outputs1[:args.labeled_bs], label_batch[:args.labeled_bs].long()) + 
-                           dice_loss(outputs_soft1[:args.labeled_bs], label_batch[:args.labeled_bs].unsqueeze(1)))
-            loss2 = 0.5 * (ce_loss(outputs2[:args.labeled_bs], label_batch[:args.labeled_bs].long()) + 
-                           dice_loss(outputs_soft2[:args.labeled_bs], label_batch[:args.labeled_bs].unsqueeze(1)))
+                outputs1 = model1(volume_batch)
+                outputs_soft1 = torch.softmax(outputs1, dim=1)
 
-            # 生成伪标签
-            pseudo_outputs1 = torch.argmax(outputs_soft1[args.labeled_bs:].detach(), dim=1, keepdim=False)
-            pseudo_outputs2 = torch.argmax(outputs_soft2[args.labeled_bs:].detach(), dim=1, keepdim=False)
+                outputs2 = model2(volume_batch)
+                outputs_soft2 = torch.softmax(outputs2, dim=1)
+                
+                # 计算不确定性
+                uncertainty = abs(torch.max(outputs_soft1, dim=1)[0] - torch.max(outputs_soft2, dim=1)[0])
+                confidence = 1 - uncertainty
+                confidence = confidence ** 4  # 不确定性的4次方加权
+                
+                # 有标签数据的损失
+                loss1 = 0.5 * (ce_loss(outputs1[:args.labeled_bs], label_batch[:args.labeled_bs].long()) + 
+                               dice_loss(outputs_soft1[:args.labeled_bs], label_batch[:args.labeled_bs].unsqueeze(1)))
+                loss2 = 0.5 * (ce_loss(outputs2[:args.labeled_bs], label_batch[:args.labeled_bs].long()) + 
+                               dice_loss(outputs_soft2[:args.labeled_bs], label_batch[:args.labeled_bs].unsqueeze(1)))
 
-            # 使用不确定性加权的伪标签损失
-            pseudo_weight = confidence[args.labeled_bs:]  # 只取无标签数据部分的权重
-            
-            # 计算加权的伪标签损失
-            criterion_no_reduction = CrossEntropyLoss(reduction='none')
-            pseudo_loss1 = criterion_no_reduction(outputs1[args.labeled_bs:], pseudo_outputs2)
-            pseudo_loss2 = criterion_no_reduction(outputs2[args.labeled_bs:], pseudo_outputs1)
-            
-            # 应用不确定性权重
-            weighted_pseudo_loss1 = (pseudo_loss1 * pseudo_weight).mean()
-            weighted_pseudo_loss2 = (pseudo_loss2 * pseudo_weight).mean()
+                # 生成伪标签
+                pseudo_outputs1 = torch.argmax(outputs_soft1[args.labeled_bs:].detach(), dim=1, keepdim=False)
+                pseudo_outputs2 = torch.argmax(outputs_soft2[args.labeled_bs:].detach(), dim=1, keepdim=False)
 
-            consistency_weight = get_current_consistency_weight(iter_num // 150)
-            
-            # 总损失
-            model1_loss = loss1 + consistency_weight * weighted_pseudo_loss1
-            model2_loss = loss2 + consistency_weight * weighted_pseudo_loss2
+                # 使用不确定性加权的伪标签损失
+                pseudo_weight = confidence[args.labeled_bs:]  # 只取无标签数据部分的权重
+                
+                # 计算加权的伪标签损失
+                criterion_no_reduction = CrossEntropyLoss(reduction='none')
+                pseudo_loss1 = criterion_no_reduction(outputs1[args.labeled_bs:], pseudo_outputs2)
+                pseudo_loss2 = criterion_no_reduction(outputs2[args.labeled_bs:], pseudo_outputs1)
+                
+                # 应用不确定性权重
+                weighted_pseudo_loss1 = (pseudo_loss1 * pseudo_weight).mean()
+                weighted_pseudo_loss2 = (pseudo_loss2 * pseudo_weight).mean()
 
-            loss = model1_loss + model2_loss
+                consistency_weight = get_current_consistency_weight(iter_num // 150)
+                
+                # 总损失
+                model1_loss = loss1 + consistency_weight * weighted_pseudo_loss1
+                model2_loss = loss2 + consistency_weight * weighted_pseudo_loss2
 
-            optimizer1.zero_grad()
-            optimizer2.zero_grad()
-            loss.backward()
-            optimizer1.step()
-            optimizer2.step()
+                loss = model1_loss + model2_loss
 
-            iter_num = iter_num + 1
+                optimizer1.zero_grad()
+                optimizer2.zero_grad()
+                loss.backward()
+                optimizer1.step()
+                optimizer2.step()
 
-            lr_ = base_lr * (1.0 - iter_num / max_iterations) ** 0.9
-            for param_group in optimizer1.param_groups:
-                param_group['lr'] = lr_
-            for param_group in optimizer2.param_groups:
-                param_group['lr'] = lr_
+                iter_num = iter_num + 1
 
-            writer.add_scalar('lr', lr_, iter_num)
-            writer.add_scalar(
-                'consistency_weight/consistency_weight', consistency_weight, iter_num)
-            writer.add_scalar('loss/model1_loss',
-                              model1_loss, iter_num)
-            writer.add_scalar('loss/model2_loss',
-                              model2_loss, iter_num)
-            logging.info('iteration %d : model1 loss : %f model2 loss : %f' % (
-                iter_num, model1_loss.item(), model2_loss.item()))
-            if iter_num % 50 == 0:
-                image = volume_batch[1, 0:1, :, :]
-                writer.add_image('train/Image', image, iter_num)
-                outputs = torch.argmax(torch.softmax(
-                    outputs1, dim=1), dim=1, keepdim=True)
-                writer.add_image('train/model1_Prediction',
-                                 outputs[1, ...] * 50, iter_num)
-                outputs = torch.argmax(torch.softmax(
-                    outputs2, dim=1), dim=1, keepdim=True)
-                writer.add_image('train/model2_Prediction',
-                                 outputs[1, ...] * 50, iter_num)
-                labs = label_batch[1, ...].unsqueeze(0) * 50
-                writer.add_image('train/GroundTruth', labs, iter_num)
+                lr_ = base_lr * (1.0 - iter_num / max_iterations) ** 0.9
+                for param_group in optimizer1.param_groups:
+                    param_group['lr'] = lr_
+                for param_group in optimizer2.param_groups:
+                    param_group['lr'] = lr_
 
-            if iter_num > 0 and iter_num % 3000 == 0:
-                model1.eval()
-                metric_list = 0.0
-                for i_batch, sampled_batch in enumerate(valloader):
-                    metric_i = test_single_volume(
-                        sampled_batch["image"], sampled_batch["label"], model1, classes=num_classes, patch_size=args.patch_size)
-                    metric_list += np.array(metric_i)
-                metric_list = metric_list / len(db_val)
-                for class_i in range(num_classes-1):
-                    writer.add_scalar('info/model1_val_{}_dice'.format(class_i+1),
-                                      metric_list[class_i, 0], iter_num)
-                    writer.add_scalar('info/model1_val_{}_hd95'.format(class_i+1),
-                                      metric_list[class_i, 1], iter_num)
+                writer.add_scalar('lr', lr_, iter_num)
+                writer.add_scalar(
+                    'consistency_weight/consistency_weight', consistency_weight, iter_num)
+                writer.add_scalar('loss/model1_loss',
+                                  model1_loss, iter_num)
+                writer.add_scalar('loss/model2_loss',
+                                  model2_loss, iter_num)
+                logging.info('iteration %d : model1 loss : %f model2 loss : %f' % (
+                    iter_num, model1_loss.item(), model2_loss.item()))
+                if iter_num % 50 == 0:
+                    image = volume_batch[1, 0:1, :, :]
+                    writer.add_image('train/Image', image, iter_num)
+                    outputs = torch.argmax(torch.softmax(
+                        outputs1, dim=1), dim=1, keepdim=True)
+                    writer.add_image('train/model1_Prediction',
+                                     outputs[1, ...] * 50, iter_num)
+                    outputs = torch.argmax(torch.softmax(
+                        outputs2, dim=1), dim=1, keepdim=True)
+                    writer.add_image('train/model2_Prediction',
+                                     outputs[1, ...] * 50, iter_num)
+                    labs = label_batch[1, ...].unsqueeze(0) * 50
+                    writer.add_image('train/GroundTruth', labs, iter_num)
 
-                performance1 = np.mean(metric_list, axis=0)[0]
+                if iter_num > 0 and iter_num % 3000 == 0:
+                    model1.eval()
+                    metric_list = 0.0
+                    for i_batch, sampled_batch in enumerate(valloader):
+                        metric_i = test_single_volume(
+                            sampled_batch["image"], sampled_batch["label"], model1, classes=num_classes, patch_size=args.patch_size)
+                        metric_list += np.array(metric_i)
+                    metric_list = metric_list / len(db_val)
+                    for class_i in range(num_classes-1):
+                        writer.add_scalar('info/model1_val_{}_dice'.format(class_i+1),
+                                          metric_list[class_i, 0], iter_num)
+                        writer.add_scalar('info/model1_val_{}_hd95'.format(class_i+1),
+                                          metric_list[class_i, 1], iter_num)
 
-                mean_hd951 = np.mean(metric_list, axis=0)[1]
-                writer.add_scalar('info/model1_val_mean_dice',
-                                  performance1, iter_num)
-                writer.add_scalar('info/model1_val_mean_hd95',
-                                  mean_hd951, iter_num)
+                    performance1 = np.mean(metric_list, axis=0)[0]
 
-                if performance1 > best_performance1:
-                    best_performance1 = performance1
-                    save_mode_path = os.path.join(snapshot_path,
-                                                  'model1_iter_{}_dice_{}.pth'.format(
-                                                      iter_num, round(best_performance1, 4)))
-                    save_best = os.path.join(snapshot_path,
-                                             '{}_best_model1.pth'.format(args.model))
+                    mean_hd951 = np.mean(metric_list, axis=0)[1]
+                    writer.add_scalar('info/model1_val_mean_dice',
+                                      performance1, iter_num)
+                    writer.add_scalar('info/model1_val_mean_hd95',
+                                      mean_hd951, iter_num)
+
+                    if performance1 > best_performance1:
+                        best_performance1 = performance1
+                        save_mode_path = os.path.join(snapshot_path,
+                                                      'model1_iter_{}_dice_{}.pth'.format(
+                                                          iter_num, round(best_performance1, 4)))
+                        save_best = os.path.join(snapshot_path,
+                                                 '{}_best_model1.pth'.format(args.model))
+                        torch.save(model1.state_dict(), save_mode_path)
+                        torch.save(model1.state_dict(), save_best)
+
+                    logging.info(
+                        'iteration %d : model1_mean_dice : %f model1_mean_hd95 : %f' % (iter_num, performance1, mean_hd951))
+                    model1.train()
+
+                    model2.eval()
+                    metric_list = 0.0
+                    for i_batch, sampled_batch in enumerate(valloader):
+                        metric_i = test_single_volume(
+                            sampled_batch["image"], sampled_batch["label"], model2, classes=num_classes, patch_size=args.patch_size)
+                        metric_list += np.array(metric_i)
+                    metric_list = metric_list / len(db_val)
+                    for class_i in range(num_classes-1):
+                        writer.add_scalar('info/model2_val_{}_dice'.format(class_i+1),
+                                          metric_list[class_i, 0], iter_num)
+                        writer.add_scalar('info/model2_val_{}_hd95'.format(class_i+1),
+                                          metric_list[class_i, 1], iter_num)
+
+                    performance2 = np.mean(metric_list, axis=0)[0]
+
+                    mean_hd952 = np.mean(metric_list, axis=0)[1]
+                    writer.add_scalar('info/model2_val_mean_dice',
+                                      performance2, iter_num)
+                    writer.add_scalar('info/model2_val_mean_hd95',
+                                      mean_hd952, iter_num)
+
+                    if performance2 > best_performance2:
+                        best_performance2 = performance2
+                        save_mode_path = os.path.join(snapshot_path,
+                                                      'model2_iter_{}_dice_{}.pth'.format(
+                                                          iter_num, round(best_performance2, 4)))
+                        save_best = os.path.join(snapshot_path,
+                                                 '{}_best_model2.pth'.format(args.model))
+                        torch.save(model2.state_dict(), save_mode_path)
+                        torch.save(model2.state_dict(), save_best)
+
+                    logging.info(
+                        'iteration %d : model2_mean_dice : %f model2_mean_hd95 : %f' % (iter_num, performance2, mean_hd952))
+                    model2.train()
+
+                if iter_num % 3000 == 0:  # 每3000次迭代保存一次
+                    # 保存model1
+                    save_mode_path = os.path.join(
+                        snapshot_path, 'model1_iter_' + str(iter_num) + '.pth')
                     torch.save(model1.state_dict(), save_mode_path)
-                    torch.save(model1.state_dict(), save_best)
+                    logging.info("save model1 to {}".format(save_mode_path))
 
-                logging.info(
-                    'iteration %d : model1_mean_dice : %f model1_mean_hd95 : %f' % (iter_num, performance1, mean_hd951))
-                model1.train()
-
-                model2.eval()
-                metric_list = 0.0
-                for i_batch, sampled_batch in enumerate(valloader):
-                    metric_i = test_single_volume(
-                        sampled_batch["image"], sampled_batch["label"], model2, classes=num_classes, patch_size=args.patch_size)
-                    metric_list += np.array(metric_i)
-                metric_list = metric_list / len(db_val)
-                for class_i in range(num_classes-1):
-                    writer.add_scalar('info/model2_val_{}_dice'.format(class_i+1),
-                                      metric_list[class_i, 0], iter_num)
-                    writer.add_scalar('info/model2_val_{}_hd95'.format(class_i+1),
-                                      metric_list[class_i, 1], iter_num)
-
-                performance2 = np.mean(metric_list, axis=0)[0]
-
-                mean_hd952 = np.mean(metric_list, axis=0)[1]
-                writer.add_scalar('info/model2_val_mean_dice',
-                                  performance2, iter_num)
-                writer.add_scalar('info/model2_val_mean_hd95',
-                                  mean_hd952, iter_num)
-
-                if performance2 > best_performance2:
-                    best_performance2 = performance2
-                    save_mode_path = os.path.join(snapshot_path,
-                                                  'model2_iter_{}_dice_{}.pth'.format(
-                                                      iter_num, round(best_performance2, 4)))
-                    save_best = os.path.join(snapshot_path,
-                                             '{}_best_model2.pth'.format(args.model))
+                    # 保存model2
+                    save_mode_path = os.path.join(
+                        snapshot_path, 'model2_iter_' + str(iter_num) + '.pth')
                     torch.save(model2.state_dict(), save_mode_path)
-                    torch.save(model2.state_dict(), save_best)
+                    logging.info("save model2 to {}".format(save_mode_path))
 
-                logging.info(
-                    'iteration %d : model2_mean_dice : %f model2_mean_hd95 : %f' % (iter_num, performance2, mean_hd952))
-                model2.train()
-
-            if iter_num % 3000 == 0:  # 每3000次迭代保存一次
-                # 保存model1
-                save_mode_path = os.path.join(
-                    snapshot_path, 'model1_iter_' + str(iter_num) + '.pth')
-                torch.save(model1.state_dict(), save_mode_path)
-                logging.info("save model1 to {}".format(save_mode_path))
-
-                # 保存model2
-                save_mode_path = os.path.join(
-                    snapshot_path, 'model2_iter_' + str(iter_num) + '.pth')
-                torch.save(model2.state_dict(), save_mode_path)
-                logging.info("save model2 to {}".format(save_mode_path))
-
+                if iter_num >= max_iterations:
+                    break
+                time1 = time.time()
+            
             if iter_num >= max_iterations:
+                iterator.close()
                 break
-            time1 = time.time()
-        if iter_num >= max_iterations:
-            iterator.close()
-            break
-    writer.close()
+
+            # 第一阶段结束后，生成和评估伪标签
+            if stage == 0:
+                # 计算每个未标记样本的稳定性分数
+                stability_scores = {}
+                for idx in unlabeled_data:
+                    predictions = []
+                    for checkpoint in checkpoints:
+                        model1.load_state_dict(torch.load(checkpoint['path']))
+                        model1.eval()
+                        with torch.no_grad():
+                            # 获取未标记数据的预测结果
+                            img = db_train[idx]['image'].unsqueeze(0).cuda()
+                            pred = model1(img)
+                            predictions.append(torch.argmax(pred, dim=1))
+                    
+                    # 计算稳定性分数（mIoU）
+                    best_pred = predictions[-1]  # 最后一个检查点的预测作为参考
+                    ious = []
+                    for pred in predictions[:-1]:
+                        intersection = torch.sum(pred & best_pred)
+                        union = torch.sum(pred | best_pred)
+                        iou = intersection.float() / union.float()
+                        ious.append(iou.item())
+                    
+                    stability_scores[idx] = np.mean(ious)
+                
+                # 选择最可靠的50%的未标记数据
+                sorted_samples = sorted(stability_scores.items(), 
+                                      key=lambda x: x[1], reverse=True)
+                reliable_count = len(unlabeled_data) // 2
+                
+                # 为可靠样本生成伪标签
+                for idx, score in sorted_samples[:reliable_count]:
+                    model1.eval()
+                    with torch.no_grad():
+                        img = db_train[idx]['image'].unsqueeze(0).cuda()
+                        pred = model1(img)
+                        pseudo_label = torch.argmax(pred, dim=1)
+                        reliable_pseudo_labels[idx] = pseudo_label
+                    
+                    unlabeled_data.remove(idx)  # 从未标记数据中移除
+                
+                # 更新训练集
+                labeled_idxs.extend(reliable_pseudo_labels.keys())
+                
+            # 第二阶段和第三阶段：使用扩展的标记数据继续训练
+            if stage > 0:
+                batch_sampler = TwoStreamBatchSampler(
+                    labeled_idxs, unlabeled_data, 
+                    batch_size, batch_size-args.labeled_bs)
+                trainloader = DataLoader(db_train, batch_sampler=batch_sampler,
+                                       num_workers=4, pin_memory=True)
+        
+        writer.close()
 
 
 if __name__ == "__main__":
